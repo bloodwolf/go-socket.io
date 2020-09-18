@@ -1,14 +1,31 @@
-# socket.io
+# go-socket.io
 
 [![GoDoc](http://godoc.org/github.com/googollee/go-socket.io?status.svg)](http://godoc.org/github.com/googollee/go-socket.io) [![Build Status](https://travis-ci.org/googollee/go-socket.io.svg)](https://travis-ci.org/googollee/go-socket.io)
 
-**Please use v1.4 branch, or import "gopkg.in/googollee/go-socket.io.v1". I have no time to maintain master branch now**
+[![Coverage Status](https://coveralls.io/repos/github/googollee/go-socket.io/badge.svg?branch=v1.4)](https://coveralls.io/github/googollee/go-socket.io?branch=v1.4)
 
-go-socket.io is an implementation of [socket.io](http://socket.io) in golang, which is a realtime application framework.
+[![Go Report Card](https://goreportcard.com/badge/github.com/googollee/go-socket.io)](https://goreportcard.com/report/github.com/googollee/go-socket.io)
 
-It is compatible with latest implementation of socket.io in node.js, and supports room and namespace.
+go-socket.io is an implementation of [Socket.IO](http://socket.io) in Golang, which is a realtime application framework.
 
-* for compatability with socket.io 0.9.x, please use branch 0.9.x *
+Currently this library supports 1.4 version of the Socket.IO client. It supports room and namespaces.
+
+Go 1.9+ is required!
+
+**Help wanted** This project is looking for contributors to help fix bugs and implement new features. Please check [Issue 192](https://github.com/googollee/go-socket.io/issues/192). All help is much appreciated.
+
+* for compatibility with Socket.IO 0.9.x, please use branch 0.9.x *
+
+
+## Contents
+
+- [Install](#install)
+- [Last changes](#last-changes)
+- [Example](#example)
+- [engineio](#engineo)
+- [Community](#community)
+- [Contributors](#contributors)
+- [License](#license)
 
 ## Install
 
@@ -26,6 +43,14 @@ import "github.com/googollee/go-socket.io"
 
 and use `socketio` as the package name inside the code.
 
+## Breaking changes
+
+| Short info | Description | Date |
+|------------|-------------|------------|
+| Changed signature of `OnError`  | Changed signature of `OnError` *From:* `server.OnError(string, func(error))` *To:* `server.OnError(string, func(Conn, error))` | 2019-10-16 |
+| Moved googollee/go-engine.io | Breaking! You need to update imports from github.com/googollee/go-engine.io to github.com/googollee/go-socket.io/engineio and remove github.com/googollee/go-engine.io from your `go.mod` and other dependency files | 2020-09-11 |
+
+
 ## Example
 
 Please check the example folder for details.
@@ -34,6 +59,7 @@ Please check the example folder for details.
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 
@@ -45,25 +71,38 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server.On("connection", func(so socketio.Socket) {
-		log.Println("on connection")
-		so.Join("chat")
-		so.On("chat message", func(msg string) {
-			log.Println("emit:", so.Emit("chat message", msg))
-			so.BroadcastTo("chat", "chat message", msg)
-		})
-		so.On("disconnection", func() {
-			log.Println("on disconnect")
-		})
+	server.OnConnect("/", func(s socketio.Conn) error {
+		s.SetContext("")
+		fmt.Println("connected:", s.ID())
+		return nil
 	})
-	server.On("error", func(so socketio.Socket, err error) {
-		log.Println("error:", err)
+	server.OnEvent("/", "notice", func(s socketio.Conn, msg string) {
+		fmt.Println("notice:", msg)
+		s.Emit("reply", "have "+msg)
 	})
+	server.OnEvent("/chat", "msg", func(s socketio.Conn, msg string) string {
+		s.SetContext(msg)
+		return "recv " + msg
+	})
+	server.OnEvent("/", "bye", func(s socketio.Conn) string {
+		last := s.Context().(string)
+		s.Emit("bye", last)
+		s.Close()
+		return last
+	})
+	server.OnError("/", func(s socketio.Conn, e error) {
+		fmt.Println("meet error:", e)
+	})
+	server.OnDisconnect("/", func(s socketio.Conn, reason string) {
+		fmt.Println("closed", reason)
+	})
+	go server.Serve()
+	defer server.Close()
 
 	http.Handle("/socket.io/", server)
 	http.Handle("/", http.FileServer(http.Dir("./asset")))
-	log.Println("Serving at localhost:5000...")
-	log.Fatal(http.ListenAndServe(":5000", nil))
+	log.Println("Serving at localhost:8000...")
+	log.Fatal(http.ListenAndServe(":8000", nil))
 }
 ```
 
@@ -86,7 +125,7 @@ func main() {
 
 ```go
 // The return type may vary depending on whether you will return
-// In golang implementation of socket.io don't used callbacks for acknowledgement,
+// In golang implementation of Socket.IO don't used callbacks for acknowledgement,
 // but used return value, which wrapped into ack package and returned to the client's callback in JavaScript
 so.On("some:event", func(msg string) string {
 	return msg //Sending ack with data in msg back to client, using "return statement"
@@ -121,6 +160,63 @@ so.Emit("some:event", dataForClient, func (so socketio.Socket, data string) {
 	log.Println("Client ACK with data: ", data)
 })
 ```
+
+##### Broadcast to All connected Client
+* Server-side
+
+```go
+//Add all connected user to a room, in example? "bcast"
+server.OnConnect("/", func(s socketio.Conn) error {
+	s.SetContext("")
+	fmt.Println("connected:", s.ID())
+	s.Join("bcast")
+	return nil
+})
+
+//Broadcast message to all connected user
+server.BroadcastToRoom("", "bcast", "event:name", msg)
+```
+* Client-side
+```
+socket.on('some:event', function (msg) {
+	console.log(msg);
+});
+```
+
+
+##### Catch Disconnected reason
+
+* Server-side
+
+```go
+
+so.OnDisconnect("/", func(so socketio.Conn, reason string) {
+  	log.Println("closed", reason)
+})
+```
+
+Possible reasons:
+
+
+| Reason | Side | Description |
+|------------|-------------|------------|
+| client namespace disconnect | Client Side | Got disconnect packet from client |
+
+## engineio
+
+This project contains a sub-package called `engineio`. This used to be a separate package under https://github.com/googollee/go-engine.io.
+
+It contains the `engine.io` analog implementation of the original node-package. https://github.com/socketio/engine.io It can be used without the socket.io-implementation. Please check the README.md in `engineio/`.
+
+## Community
+
+Telegram chat: [@go_socketio](https://t.me/go_socketio)
+
+
+## Contributors
+
+This project exists thanks to all the people who contribute. [[Contribute](CONTRIBUTING.md)].
+<a href="https://github.com/googollee/go-socket.io/graphs/contributors">
 
 ## License
 
